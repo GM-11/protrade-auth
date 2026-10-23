@@ -14,8 +14,13 @@ public class RefreshTokenRepository {
 	public record Rotated(long accountId, UUID familyId, OffsetDateTime familyExpiresAt) {
 	}
 
-	/** A token row looked up by hash (only the fields reuse detection needs). */
-	public record Row(UUID familyId, boolean used) {
+	/** A token row looked up by hash: what reuse detection needs to decide. */
+	public record Row(long accountId, UUID familyId, OffsetDateTime usedAt, boolean revoked,
+			OffsetDateTime expiresAt, OffsetDateTime familyExpiresAt) {
+
+		public boolean used() {
+			return usedAt != null;
+		}
 	}
 
 	private final JdbcClient jdbc;
@@ -46,9 +51,13 @@ public class RefreshTokenRepository {
 	}
 
 	public Optional<Row> find(byte[] hash) {
-		return jdbc.sql("SELECT family_id, used_at IS NOT NULL AS used FROM refresh_tokens WHERE token_sha256 = ?")
+		return jdbc.sql("""
+				SELECT account_id, family_id, used_at, revoked_at IS NOT NULL AS revoked, expires_at, family_expires_at
+				FROM refresh_tokens WHERE token_sha256 = ?""")
 				.param(hash)
-				.query((rs, i) -> new Row(rs.getObject("family_id", UUID.class), rs.getBoolean("used")))
+				.query((rs, i) -> new Row(rs.getLong("account_id"), rs.getObject("family_id", UUID.class),
+						rs.getObject("used_at", OffsetDateTime.class), rs.getBoolean("revoked"),
+						rs.getObject("expires_at", OffsetDateTime.class), rs.getObject("family_expires_at", OffsetDateTime.class)))
 				.optional();
 	}
 

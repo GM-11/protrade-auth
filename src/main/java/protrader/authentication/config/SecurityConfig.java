@@ -24,6 +24,9 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import protrader.authentication.ratelimit.ClientIpResolver;
+import protrader.authentication.ratelimit.RateLimitFilter;
+import protrader.authentication.ratelimit.RateLimiters;
 import protrader.authentication.token.JwtVerifier;
 import protrader.authentication.web.ApiException;
 import protrader.authentication.web.ErrorWriter;
@@ -105,13 +108,30 @@ public class SecurityConfig {
 		return bean;
 	}
 
+	@Bean
+	ClientIpResolver clientIpResolver(AuthProperties props) {
+		return new ClientIpResolver(props.rateLimit().trustedProxyCidrs());
+	}
+
+	@Bean
+	FilterRegistrationBean<RateLimitFilter> rateLimitFilter(RateLimiters limiters, ClientIpResolver clients, ErrorWriter errors) {
+		FilterRegistrationBean<RateLimitFilter> bean = new FilterRegistrationBean<>(new RateLimitFilter(limiters, clients, errors));
+		bean.setOrder(Ordered.HIGHEST_PRECEDENCE + 2);
+		return bean;
+	}
+
 	/** Second listener for /internal/**. Don't route this port through the public load balancer. */
 	@Bean
 	WebServerFactoryCustomizer<TomcatServletWebServerFactory> internalConnector(AuthProperties props) {
+		return internalConnectorCustomizer(props);
+	}
+
+	static WebServerFactoryCustomizer<TomcatServletWebServerFactory> internalConnectorCustomizer(AuthProperties props) {
 		return factory -> {
 			if (props.internalPort() > 0) {
 				var connector = new org.apache.catalina.connector.Connector(TomcatServletWebServerFactory.DEFAULT_PROTOCOL);
 				connector.setPort(props.internalPort());
+				connector.setProperty("address", props.internalBindAddress());
 				factory.addAdditionalConnectors(connector);
 			}
 		};

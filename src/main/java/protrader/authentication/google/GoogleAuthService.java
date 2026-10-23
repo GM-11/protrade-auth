@@ -25,6 +25,7 @@ public class GoogleAuthService {
 	private static final Pattern PKCE_VERIFIER = Pattern.compile("[A-Za-z0-9\\-._~]{43,128}");
 	private static final int MAX_NAME = 40;
 
+	private final GoogleNonceService nonces;
 	private final GoogleTokenExchange exchange;
 	private final GoogleIdTokenVerifier verifier;
 	private final AccountRepository accounts;
@@ -34,9 +35,10 @@ public class GoogleAuthService {
 	private final java.time.Clock clock;
 	private final AuthProperties.Google config;
 
-	public GoogleAuthService(GoogleTokenExchange exchange, GoogleIdTokenVerifier verifier, AccountRepository accounts,
+	public GoogleAuthService(GoogleNonceService nonces, GoogleTokenExchange exchange, GoogleIdTokenVerifier verifier, AccountRepository accounts,
 			RefreshTokenRepository refreshTokens, TokenService tokens, TransactionTemplate tx, java.time.Clock clock,
 			AuthProperties props) {
+		this.nonces = nonces;
 		this.exchange = exchange;
 		this.verifier = verifier;
 		this.accounts = accounts;
@@ -70,6 +72,10 @@ public class GoogleAuthService {
 	}
 
 	private GoogleIdentity fromIdToken(GoogleAuthRequest req) {
+		// burn the server-issued nonce first, atomically, so a replayed token never gets as far as validation
+		if (!nonces.consume(req.nonce())) {
+			throw new GoogleRejectedException("nonce unknown, expired or already used");
+		}
 		return verifier.verify(req.idToken(), req.nonce(), true);
 	}
 
@@ -97,8 +103,8 @@ public class GoogleAuthService {
 			if (req.idToken() == null || req.idToken().isBlank() || req.idToken().length() > 8192) {
 				throw ApiException.invalidField("id_token", "id_token is required");
 			}
-			if (req.nonce() != null && (req.nonce().isEmpty() || req.nonce().length() > 256)) {
-				throw ApiException.invalidField("nonce", "nonce must be 1-256 characters");
+			if (req.nonce() == null || req.nonce().isEmpty() || req.nonce().length() > 256) {
+				throw ApiException.invalidField("nonce", "nonce is required: get one from POST /v1/auth/google/nonce");
 			}
 		}
 	}

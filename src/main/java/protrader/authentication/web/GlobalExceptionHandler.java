@@ -8,6 +8,8 @@ import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import protrader.authentication.ratelimit.RateLimitedException;
+
 /** Every error leaves as {"error":...} JSON, never HTML and never an exception message. */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -16,7 +18,11 @@ public class GlobalExceptionHandler {
 
 	@ExceptionHandler(ApiException.class)
 	ResponseEntity<ApiError> api(ApiException e) {
-		return ResponseEntity.status(e.status()).body(new ApiError(e.code(), e.getMessage(), e.field()));
+		ResponseEntity.BodyBuilder response = ResponseEntity.status(e.status());
+		if (e instanceof RateLimitedException limited) {
+			response.header("Retry-After", Long.toString(limited.retryAfterSeconds()));
+		}
+		return response.body(new ApiError(e.code(), e.getMessage(), e.field()));
 	}
 
 	@ExceptionHandler(Exception.class)

@@ -9,9 +9,11 @@ import org.springframework.web.bind.annotation.RestController;
 import protrader.authentication.account.AccountService;
 import protrader.authentication.google.GoogleAuthRequest;
 import protrader.authentication.google.GoogleAuthService;
+import protrader.authentication.google.GoogleNonceService;
 import protrader.authentication.token.LoginResponse;
 import protrader.authentication.token.TokenService;
 import protrader.authentication.web.Dtos.LoginRequest;
+import protrader.authentication.web.Dtos.NonceResponse;
 import protrader.authentication.web.Dtos.RefreshRequest;
 import protrader.authentication.web.Dtos.SignupRequest;
 import protrader.authentication.web.Dtos.SignupResponse;
@@ -26,8 +28,10 @@ public class AuthController {
 	private final AccountService accounts;
 	private final TokenService tokens;
 	private final GoogleAuthService google;
+	private final GoogleNonceService nonces;
 
-	public AuthController(AccountService accounts, TokenService tokens, GoogleAuthService google) {
+	public AuthController(AccountService accounts, TokenService tokens, GoogleAuthService google, GoogleNonceService nonces) {
+		this.nonces = nonces;
 		this.accounts = accounts;
 		this.tokens = tokens;
 		this.google = google;
@@ -63,6 +67,11 @@ public class AuthController {
 			tokens.logout(token);
 		}
 		return ResponseEntity.noContent().build();
+	}
+
+	@PostMapping("/google/nonce")
+	NonceResponse googleNonce() {
+		return new NonceResponse(nonces.issue(), GoogleNonceService.TTL.toSeconds());
 	}
 
 	@PostMapping("/google")

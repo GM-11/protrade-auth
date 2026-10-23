@@ -28,6 +28,7 @@ All settings are environment variables (mapped in `src/main/resources/applicatio
 | `DB_USER` / `DB_PASSWORD` | `postgres` / `postgres` | Postgres credentials |
 | `SERVER_PORT` | `8082` | public port (user API + JWKS) |
 | `INTERNAL_PORT` | `8081` | internal port (`/internal/**` only); `0` disables it |
+| `INTERNAL_BIND_ADDRESS` | `127.0.0.1` | address the internal port listens on. **In Docker or Kubernetes set `0.0.0.0`** (otherwise the gateway can't reach it) and keep the port off every public route |
 | `JWT_ISSUER` | `protrader-identity` | `iss` claim; must equal the gateway's `JWT_ISSUER` |
 | `JWT_AUDIENCE` | `order-gateway` | `aud` claim; must equal the gateway's `JWT_AUDIENCE` |
 | `JWT_PRIVATE_KEY_FILE` | – | Ed25519 private key, PKCS#8 (PEM or bare base64). Required unless profile `dev` |
@@ -36,6 +37,11 @@ All settings are environment variables (mapped in `src/main/resources/applicatio
 | `ACCESS_TOKEN_TTL` | `1h` | startup fails if above 1 h |
 | `REFRESH_TOKEN_TTL` | `30d` | lifetime of one refresh token |
 | `REFRESH_FAMILY_MAX_TTL` | `90d` | absolute cap for one login chain, however active the user is |
+| `REFRESH_REUSE_GRACE` | `10s` | a refresh token rotated this recently may be presented again (lost response / concurrent refresh); see below |
+| `RATE_LIMIT_PER_IP_PER_MINUTE` | `20` | per client IP, per endpoint, on signup / login / refresh / google / google/nonce |
+| `RATE_LIMIT_LOGIN_FAILURES_PER_EMAIL` | `5` | login attempts that fail, per lower-cased email, per window |
+| `RATE_LIMIT_LOGIN_FAILURE_WINDOW` | `15m` | the window for the line above |
+| `TRUSTED_PROXY_CIDRS` | – | comma list of proxy IPs / CIDRs whose `X-Forwarded-For` is believed; empty = never |
 | `GOOGLE_CLIENT_ID` | – | Google web client id |
 | `GOOGLE_CLIENT_SECRET` | – | Google web client secret (env / secret store only, never commit it) |
 | `GOOGLE_ALLOWED_REDIRECT_URIS` | – | comma list, exact string match |
@@ -93,12 +99,24 @@ GATEWAY_ID=gw-1 ./order_gateway
 The gateway polls the key table every 30 s, so a new or disabled API key takes up to 30 s to take effect.
 
 > **Do not route port 8081 through the public load balancer.** `/internal/**` has no authentication (the gateway sends no credentials); the separate port is the protection. The public port answers 404 for `/internal/**` and the internal port answers 404 for everything else except `/healthz` and `/readyz`.
+>
+> The internal port listens on `127.0.0.1` by default. **In Docker or Kubernetes you must set `INTERNAL_BIND_ADDRESS=0.0.0.0`** for the gateway to reach it from another container or pod, and then keep 8081 off every public route (no Ingress rule, no public Service, no published port).
 
 ## Behaviour worth knowing
 
 - Wrong email and wrong password give the same `401 bad_credentials` body, after the same amount of BCrypt work.
-- Refresh tokens are single-use. Reuse of an already-rotated token revokes the whole family. Two simultaneous refreshes with the same token: one can win; the loser sees a used token and revokes the family, so the winner's new token dies too. That is deliberate (a stolen copy and a badly retrying client look the same).
+- Refresh tokens rotate on every use. Presenting a token that was already rotated:
+  - **within `REFRESH_REUSE_GRACE` (10 s) of the rotation** is treated as a retry after a lost response, or the loser of two simultaneous refreshes: it gets a fresh sibling token in the same family, nothing is revoked, both descendants stay valid;
+  - **after the window** is treated as a stolen copy: the whole family is revoked and the answer is `401 bad_refresh_token`.
+
+  The trade-off: a thief who replays a stolen token *inside* the 10 s window is not detected, and gets a working token of their own. We accept that because the thief would need the token within seconds of its rotation, while without a window every dropped response (mobile networks, a closed tab, two tabs refreshing together) would log the user out. Set `REFRESH_REUSE_GRACE=0s` for strict single-use.
+- Rate limits (`429 rate_limited`, with `Retry-After` in seconds), checked before any BCrypt work:
+  - per client IP, per endpoint, 20 requests a minute on `signup`, `login`, `refresh`, `google` and `google/nonce` (a token bucket);
+  - on `login` only, additionally 5 *failed* attempts per lower-cased email per 15 minutes (the same bucket for existing and unknown emails). A successful login gives its attempt back. The account is never locked: once the bucket refills, the right password works again.
+  - **The state is per instance, in memory.** With N instances behind a load balancer, the effective limits are up to N times higher, and a restart forgets everything. Idle entries are evicted and the maps are size-bounded.
+  - The client IP is the socket peer. `X-Forwarded-For` is read only when the peer is inside `TRUSTED_PROXY_CIDRS` (empty by default), taking the right-most entry that is not itself a trusted proxy. IPv6 clients are limited per /64. Behind a load balancer you must set `TRUSTED_PROXY_CIDRS`, otherwise every user shares the balancer's bucket.
 - Signing in with Google for an email that already has a password account links the Google identity to it, **removes the password and revokes that account's refresh tokens**. Signup does not verify email ownership yet, so without this an attacker could pre-register someone's address with a password they know.
+- **Access tokens already issued survive the Google link.** The link drops the password and revokes the refresh tokens, but an access token someone obtained with the old password stays valid for up to 1 hour (the gateway verifies tokens locally and never calls us).
 - A Google identity whose email belongs to an account already linked to a *different* Google identity is refused (`401`), never taken over.
 - Request handling mirrors the gateway: `415 content_type_must_be_json`, `413 request_too_large` (16 KB), `400 invalid_json` (unparseable or unknown field), `400 malformed_json` (data after the JSON object). Every error is `{"error":...}` JSON.
 - Expired refresh-token rows are deleted daily (at 03:17), 7 days after expiry.
@@ -120,8 +138,16 @@ Two request shapes, exactly one of them:
 
 ```json
 {"code":"4/0A...","code_verifier":"<43-128 chars>","redirect_uri":"https://app.example.com/auth/callback"}
-{"id_token":"<Google ID token>","nonce":"<optional>"}
+{"id_token":"<Google ID token>","nonce":"<from POST /v1/auth/google/nonce>"}
 ```
+
+**The `id_token` shape needs a server-issued nonce** (a nonce the client picks proves nothing about freshness, so it can't stop a stolen ID token being replayed):
+
+1. `POST /v1/auth/google/nonce` (no auth, no body) returns `{"nonce":"<32 random bytes, base64url>","expires_in":300}`. Only its SHA-256 is stored.
+2. The app passes that nonce to Google's sign-in as the `nonce` parameter, so it ends up in the ID token's `nonce` claim.
+3. The app sends `{"id_token", "nonce"}`. We burn the nonce atomically *before* looking at the token (unknown, expired or already used gives `401 bad_credentials`), then require the token's `nonce` claim to equal it. A missing `nonce` is `422 invalid_field` with `field:"nonce"`.
+
+Each nonce works once and expires after 5 minutes. The code + PKCE shape is unchanged (the code is single-use by itself).
 
 The answer is the same as login. Errors: `422 invalid_field` (+`field`), `401 bad_credentials` for anything Google or our checks reject (never says why), `503 google_unavailable`.
 

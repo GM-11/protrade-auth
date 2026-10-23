@@ -8,6 +8,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
+import protrader.authentication.ratelimit.RateLimitedException;
+import protrader.authentication.ratelimit.RateLimiters;
 import protrader.authentication.web.ApiException;
 
 @Service
@@ -16,12 +18,14 @@ public class AccountService {
 	static final int BCRYPT_STRENGTH = 12;
 
 	private final AccountRepository accounts;
+	private final RateLimiters limiters;
 	private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder(BCRYPT_STRENGTH);
 	/** Same cost as real hashes; checked when there is no account or no password so timing doesn't tell which. */
 	private final String dummyHash;
 
-	public AccountService(AccountRepository accounts) {
+	public AccountService(AccountRepository accounts, RateLimiters limiters) {
 		this.accounts = accounts;
+		this.limiters = limiters;
 		this.dummyHash = encoder.encode("dummy-password-for-timing-only");
 	}
 
@@ -45,6 +49,15 @@ public class AccountService {
 			throw ApiException.invalidField(rawEmail == null ? "email" : "password", "required");
 		}
 		String email = rawEmail.trim().toLowerCase(Locale.ROOT);
+
+		// A token is spent per attempt and given back on success, so only failures count. Checked before
+		// any BCrypt work and keyed on the email whether or not it exists, so it can't be used to probe.
+		// The account is never locked: once the bucket refills, the right password works again.
+		String limitKey = email.length() > 254 ? email.substring(0, 254) : email;
+		long wait = limiters.loginFailures().tryAcquire(limitKey);
+		if (wait > 0) {
+			throw new RateLimitedException(wait);
+		}
 		Account account = email.length() > 254 ? null : accounts.findByEmail(email).orElse(null);
 		boolean hasPassword = account != null && account.passwordHash() != null;
 		// signup refuses >72 bytes, so a longer attempt can't be right (and BCrypt rejects it); still burn the same time
@@ -53,6 +66,7 @@ public class AccountService {
 		if (!hasPassword || !ok) {
 			throw ApiException.badCredentials();
 		}
+		limiters.loginFailures().refund(limitKey);
 		return account.id();
 	}
 

@@ -9,10 +9,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties("auth")
 public record AuthProperties(
 		int internalPort,
+		String internalBindAddress,
 		Duration accessTokenTtl,
 		Duration refreshTokenTtl,
 		Duration refreshFamilyMaxTtl,
+		Duration refreshReuseGrace,
 		List<String> corsAllowedOrigins,
+		RateLimit rateLimit,
 		Jwt jwt,
 		Google google) {
 
@@ -29,7 +32,21 @@ public record AuthProperties(
 		if (refreshFamilyMaxTtl.compareTo(refreshTokenTtl) < 0) {
 			throw new IllegalStateException("REFRESH_FAMILY_MAX_TTL must be at least REFRESH_TOKEN_TTL");
 		}
+		if (refreshReuseGrace.isNegative()) {
+			throw new IllegalStateException("REFRESH_REUSE_GRACE must not be negative");
+		}
 		corsAllowedOrigins = clean(corsAllowedOrigins);
+	}
+
+	/** Per-instance, in-memory limits (see the README). */
+	public record RateLimit(int perIpPerMinute, int loginFailuresPerEmail, Duration loginFailureWindow, List<String> trustedProxyCidrs) {
+
+		public RateLimit {
+			if (perIpPerMinute < 1 || loginFailuresPerEmail < 1 || loginFailureWindow.isZero() || loginFailureWindow.isNegative()) {
+				throw new IllegalStateException("rate-limit settings must be positive");
+			}
+			trustedProxyCidrs = clean(trustedProxyCidrs);
+		}
 	}
 
 	public record Jwt(String issuer, String audience, String kid, String privateKeyFile, String retiredPublicKeysDir) {

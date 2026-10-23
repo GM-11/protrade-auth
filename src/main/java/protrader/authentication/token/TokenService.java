@@ -1,8 +1,5 @@
 package protrader.authentication.token;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -37,6 +34,7 @@ public class TokenService {
 	private final Duration accessTtl;
 	private final Duration refreshTtl;
 	private final Duration familyMaxTtl;
+	private final Duration reuseGrace;
 
 	public TokenService(JwtSigner signer, RefreshTokenRepository refreshTokens, TransactionTemplate tx, Clock clock, AuthProperties props) {
 		this.signer = signer;
@@ -46,41 +44,58 @@ public class TokenService {
 		this.accessTtl = props.accessTokenTtl();
 		this.refreshTtl = props.refreshTokenTtl();
 		this.familyMaxTtl = props.refreshFamilyMaxTtl();
+		this.reuseGrace = props.refreshReuseGrace();
 	}
 
 	/** A fresh login: new refresh-token family. */
 	public LoginResponse login(long accountId) {
 		OffsetDateTime now = now();
 		String refresh = newRefreshToken();
-		refreshTokens.insert(accountId, UUID.randomUUID(), sha256(refresh), now,
+		refreshTokens.insert(accountId, UUID.randomUUID(), Hashes.sha256(refresh), now,
 				now.plus(refreshTtl), now.plus(familyMaxTtl));
 		return response(accountId, refresh);
 	}
 
 	/**
-	 * Rotates a refresh token. A token that was already rotated is a replay: the whole family is
-	 * revoked. Two simultaneous refreshes with one token: one wins the conditional UPDATE, the loser
-	 * sees a used token and revokes the family (so the winner's new token dies too; accepted).
+	 * Rotates a refresh token. A token already rotated within {@code REFRESH_REUSE_GRACE} is treated as
+	 * a retry after a lost response (or the loser of a concurrent refresh): it gets a fresh sibling
+	 * token in the same family and nothing is revoked. Replayed after the window, it is a stolen copy:
+	 * the whole family is revoked.
 	 */
 	public LoginResponse refresh(String token) {
-		byte[] hash = sha256(token);
+		byte[] hash = Hashes.sha256(token);
 		Optional<LoginResponse> rotated = tx.execute(status -> {
 			OffsetDateTime now = now();
 			Optional<RefreshTokenRepository.Rotated> used = refreshTokens.markUsed(hash, now);
 			if (used.isPresent()) {
 				RefreshTokenRepository.Rotated r = used.get();
-				String next = newRefreshToken();
-				OffsetDateTime expires = min(now.plus(refreshTtl), r.familyExpiresAt());
-				refreshTokens.insert(r.accountId(), r.familyId(), sha256(next), now, expires, r.familyExpiresAt());
-				return Optional.of(response(r.accountId(), next));
+				return Optional.of(issueInFamily(r.accountId(), r.familyId(), r.familyExpiresAt(), now));
 			}
-			refreshTokens.find(hash).filter(RefreshTokenRepository.Row::used)
-					.ifPresent(row -> refreshTokens.revokeFamily(row.familyId(), now));
+			Optional<RefreshTokenRepository.Row> row = refreshTokens.find(hash);
+			if (row.isEmpty() || !row.get().used()) {
+				return Optional.empty(); // unknown, expired or revoked: plain no
+			}
+			RefreshTokenRepository.Row r = row.get();
+			boolean withinGrace = !r.revoked()
+					&& !r.usedAt().plus(reuseGrace).isBefore(now)
+					&& r.expiresAt().isAfter(now)
+					&& r.familyExpiresAt().isAfter(now);
+			if (withinGrace) {
+				return Optional.of(issueInFamily(r.accountId(), r.familyId(), r.familyExpiresAt(), now));
+			}
+			refreshTokens.revokeFamily(r.familyId(), now);
 			return Optional.empty();
 		});
-		// the revoke above is committed; only now do we say no
+		// a revoke above is committed; only now do we say no
 		return rotated.orElseThrow(() -> new ApiException(org.springframework.http.HttpStatus.UNAUTHORIZED,
 				"bad_refresh_token", "invalid refresh token"));
+	}
+
+	private LoginResponse issueInFamily(long accountId, UUID familyId, OffsetDateTime familyExpiresAt, OffsetDateTime now) {
+		String next = newRefreshToken();
+		OffsetDateTime expires = min(now.plus(refreshTtl), familyExpiresAt);
+		refreshTokens.insert(accountId, familyId, Hashes.sha256(next), now, expires, familyExpiresAt);
+		return response(accountId, next);
 	}
 
 	/** Revokes the token's whole family. Silent when the token is unknown, so it is safe to repeat. */
@@ -88,7 +103,7 @@ public class TokenService {
 		if (token == null || token.isEmpty()) {
 			return;
 		}
-		byte[] hash = sha256(token);
+		byte[] hash = Hashes.sha256(token);
 		refreshTokens.find(hash).ifPresent(row -> refreshTokens.revokeFamily(row.familyId(), now()));
 	}
 
@@ -119,13 +134,5 @@ public class TokenService {
 		byte[] bytes = new byte[32];
 		RANDOM.nextBytes(bytes);
 		return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-	}
-
-	static byte[] sha256(String s) {
-		try {
-			return MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
-		} catch (NoSuchAlgorithmException e) {
-			throw new IllegalStateException(e);
-		}
 	}
 }

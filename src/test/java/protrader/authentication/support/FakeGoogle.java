@@ -18,12 +18,19 @@ public class FakeGoogle implements GoogleTokenExchange, GoogleIdTokenVerifier {
 	}
 
 	private final Map<String, GoogleIdentity> tokens = new ConcurrentHashMap<>();
+	private final Map<String, String> nonceClaims = new ConcurrentHashMap<>();
 	private final Map<String, String> codes = new ConcurrentHashMap<>();
 	public final List<Call> exchanges = new ArrayList<>();
 	public volatile boolean down;
 
 	public void register(String idToken, GoogleIdentity identity) {
 		tokens.put(idToken, identity);
+	}
+
+	/** Like register, but the token carries this nonce claim, which must equal the request's nonce. */
+	public void register(String idToken, GoogleIdentity identity, String nonceClaim) {
+		tokens.put(idToken, identity);
+		nonceClaims.put(idToken, nonceClaim);
 	}
 
 	public void registerCode(String code, String idToken) {
@@ -48,6 +55,10 @@ public class FakeGoogle implements GoogleTokenExchange, GoogleIdTokenVerifier {
 		GoogleIdentity id = tokens.get(idToken);
 		if (id == null) {
 			throw new GoogleRejectedException("unknown token");
+		}
+		String claim = nonceClaims.get(idToken);
+		if (claim != null && !claim.equals(nonce)) {
+			throw new GoogleRejectedException("nonce mismatch");
 		}
 		return id;
 	}

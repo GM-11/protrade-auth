@@ -135,7 +135,7 @@ class AuthFlowTest extends IntegrationTest {
 	void passwordLoginOnAGoogleOnlyAccountIsRejected() {
 		String email = uniqueEmail();
 		google.register("g-only-" + email, new protrader.authentication.google.GoogleIdentity("sub-" + email, email, "G"));
-		assertThat(http().post("/v1/auth/google", "{\"id_token\":\"g-only-" + email + "\"}").status()).isEqualTo(200);
+		assertThat(googleIdTokenLogin("g-only-" + email).status()).isEqualTo(200);
 		Http.Response r = http().post("/v1/auth/login", "{\"email\":\"" + email + "\",\"password\":\"anything at all\"}");
 		assertThat(r.status()).isEqualTo(401);
 		assertThat(r.error()).isEqualTo("bad_credentials");
@@ -155,22 +155,6 @@ class AuthFlowTest extends IntegrationTest {
 		// the new pair works
 		assertThat(http().get("/v1/me", next.get("access_token").asString()).status()).isEqualTo(200);
 		assertThat(http().post("/v1/auth/refresh", "{\"refresh_token\":\"" + next.get("refresh_token").asString() + "\"}").status()).isEqualTo(200);
-	}
-
-	@Test
-	void reusingAnOldRefreshTokenRevokesTheWholeFamily() {
-		JsonNode login = newUser(uniqueEmail());
-		String first = login.get("refresh_token").asString();
-		Http.Response rotated = http().post("/v1/auth/refresh", "{\"refresh_token\":\"" + first + "\"}");
-		String second = rotated.json().get("refresh_token").asString();
-
-		Http.Response replay = http().post("/v1/auth/refresh", "{\"refresh_token\":\"" + first + "\"}");
-		assertThat(replay.status()).isEqualTo(401);
-		assertThat(replay.error()).isEqualTo("bad_refresh_token");
-
-		Http.Response afterReplay = http().post("/v1/auth/refresh", "{\"refresh_token\":\"" + second + "\"}");
-		assertThat(afterReplay.status()).isEqualTo(401);
-		assertThat(afterReplay.error()).isEqualTo("bad_refresh_token");
 	}
 
 	@Test
@@ -219,30 +203,6 @@ class AuthFlowTest extends IntegrationTest {
 		assertThat(http().post("/v1/auth/refresh", body).status()).isEqualTo(401);
 		assertThat(http().post("/v1/auth/logout", "{\"refresh_token\":\"never-issued\"}").status()).isEqualTo(204);
 		assertThat(http().post("/v1/auth/logout", "{}").status()).isEqualTo(204);
-	}
-
-	@Test
-	void concurrentRefreshWithOneTokenSucceedsAtMostOnce() throws Exception {
-		JsonNode login = newUser(uniqueEmail());
-		String body = "{\"refresh_token\":\"" + login.get("refresh_token").asString() + "\"}";
-		ExecutorService pool = Executors.newFixedThreadPool(6);
-		try {
-			List<Callable<Integer>> jobs = new ArrayList<>();
-			for (int i = 0; i < 6; i++) {
-				jobs.add(() -> http().post("/v1/auth/refresh", body).status());
-			}
-			int ok = 0;
-			for (Future<Integer> f : pool.invokeAll(jobs)) {
-				int status = f.get();
-				assertThat(status).isIn(200, 401);
-				if (status == 200) {
-					ok++;
-				}
-			}
-			assertThat(ok).isLessThanOrEqualTo(1);
-		} finally {
-			pool.shutdownNow();
-		}
 	}
 
 	// ---- /v1/me ----

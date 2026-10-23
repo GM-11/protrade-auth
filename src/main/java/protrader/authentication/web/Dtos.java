@@ -16,6 +16,9 @@ public final class Dtos {
 	public record SignupResponse(@JsonProperty("account_id") String accountId) {
 	}
 
+	public record NonceResponse(String nonce, @JsonProperty("expires_in") long expiresIn) {
+	}
+
 	public record LoginRequest(String email, String password) {
 	}
 

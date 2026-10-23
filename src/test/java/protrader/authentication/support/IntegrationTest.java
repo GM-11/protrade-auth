@@ -24,7 +24,7 @@ import tools.jackson.databind.JsonNode;
 		"auth.google.allowed-redirect-uris=https://app.example.com/auth/callback",
 		"auth.google.extra-audiences=test-android-client",
 })
-@ActiveProfiles("dev")
+@ActiveProfiles({"dev", "test"})
 @Import(FakeGoogleConfig.class)
 public abstract class IntegrationTest {
 
@@ -73,6 +73,20 @@ public abstract class IntegrationTest {
 
 	protected static String uniqueEmail() {
 		return "user-" + UUID.randomUUID() + "@example.com";
+	}
+
+	/** A fresh server-issued Google nonce. */
+	protected String newNonce() {
+		Http.Response r = http().post("/v1/auth/google/nonce", "");
+		if (r.status() != 200) {
+			throw new AssertionError("nonce failed: " + r.status() + " " + r.body());
+		}
+		return r.json().get("nonce").asString();
+	}
+
+	/** The id_token shape with a freshly issued nonce. */
+	protected Http.Response googleIdTokenLogin(String idToken) {
+		return http().post("/v1/auth/google", "{\"id_token\":\"" + idToken + "\",\"nonce\":\"" + newNonce() + "\"}");
 	}
 
 	/** Signs up and logs in; returns the login response JSON. */

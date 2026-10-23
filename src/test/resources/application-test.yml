@@ -1,0 +1,5 @@
+# generous limits for the shared test context; the rate-limit tests override them
+auth:
+  rate-limit:
+    per-ip-per-minute: 100000
+    login-failures-per-email: 100000

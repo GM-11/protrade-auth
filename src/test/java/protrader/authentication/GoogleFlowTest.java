@@ -28,7 +28,7 @@ class GoogleFlowTest extends IntegrationTest {
 	}
 
 	private Http.Response googleIdToken(String token) {
-		return http().post("/v1/auth/google", "{\"id_token\":\"" + token + "\"}");
+		return googleIdTokenLogin(token);
 	}
 
 	@Test
@@ -157,7 +157,10 @@ class GoogleFlowTest extends IntegrationTest {
 		// exact match only: no prefix, no extra path, no trailing slash
 		assertField("{\"code\":\"c\",\"code_verifier\":\"" + VERIFIER + "\",\"redirect_uri\":\"" + REDIRECT + "/x\"}", "redirect_uri");
 		assertField("{\"code\":\"c\",\"code_verifier\":\"" + VERIFIER + "\",\"redirect_uri\":\"https://evil.example.com/\"}", "redirect_uri");
-		assertField("{\"id_token\":\"\"}", "id_token");
+		assertField("{\"id_token\":\"\",\"nonce\":\"n\"}", "id_token");
+		assertField("{\"id_token\":\"t\"}", "nonce");
+		assertField("{\"id_token\":\"t\",\"nonce\":\"\"}", "nonce");
+		assertField("{\"nonce\":\"n\"}", "id_token");
 	}
 
 	private void assertField(String body, String field) {

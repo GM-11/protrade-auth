@@ -1,0 +1,62 @@
+spring:
+  application:
+    name: authentication
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/authentication}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+  flyway:
+    enabled: true
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  mvc:
+    problemdetails:
+      enabled: false
+  web:
+    resources:
+      add-mappings: false
+
+server:
+  port: ${SERVER_PORT:8082}
+  server-header: ""
+  error:
+    include-message: never
+    include-stacktrace: never
+
+auth:
+  internal-port: ${INTERNAL_PORT:8081}
+  access-token-ttl: ${ACCESS_TOKEN_TTL:1h}
+  refresh-token-ttl: ${REFRESH_TOKEN_TTL:30d}
+  refresh-family-max-ttl: ${REFRESH_FAMILY_MAX_TTL:90d}
+  cors-allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  jwt:
+    issuer: ${JWT_ISSUER:protrader-identity}
+    audience: ${JWT_AUDIENCE:order-gateway}
+    kid: ${JWT_KID:}
+    private-key-file: ${JWT_PRIVATE_KEY_FILE:}
+    retired-public-keys-dir: ${JWT_RETIRED_PUBLIC_KEYS_DIR:}
+  google:
+    client-id: ${GOOGLE_CLIENT_ID:}
+    client-secret: ${GOOGLE_CLIENT_SECRET:}
+    allowed-redirect-uris: ${GOOGLE_ALLOWED_REDIRECT_URIS:}
+    extra-audiences: ${GOOGLE_EXTRA_AUDIENCES:}
+    discovery-url: ${GOOGLE_DISCOVERY_URL:https://accounts.google.com/.well-known/openid-configuration}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+logging:
+  level:
+    protrader.authentication: DEBUG
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+logging:
+  level:
+    root: INFO

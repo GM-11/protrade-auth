@@ -39,11 +39,17 @@ public record AuthProperties(
 	}
 
 	/** Per-instance, in-memory limits (see the README). */
-	public record RateLimit(int perIpPerMinute, int loginFailuresPerEmail, Duration loginFailureWindow, List<String> trustedProxyCidrs) {
+	public record RateLimit(int perIpPerMinute, int loginFailuresPerEmailIp, int loginFailuresPerEmail, Duration loginFailureWindow,
+			List<String> trustedProxyCidrs) {
 
 		public RateLimit {
-			if (perIpPerMinute < 1 || loginFailuresPerEmail < 1 || loginFailureWindow.isZero() || loginFailureWindow.isNegative()) {
+			if (perIpPerMinute < 1 || loginFailuresPerEmailIp < 1 || loginFailuresPerEmail < 1
+					|| loginFailureWindow.isZero() || loginFailureWindow.isNegative()) {
 				throw new IllegalStateException("rate-limit settings must be positive");
+			}
+			if (loginFailuresPerEmail < loginFailuresPerEmailIp) {
+				throw new IllegalStateException("RATE_LIMIT_LOGIN_FAILURES_PER_EMAIL (" + loginFailuresPerEmail
+						+ ") must be at least RATE_LIMIT_LOGIN_FAILURES_PER_EMAIL_IP (" + loginFailuresPerEmailIp + ")");
 			}
 			trustedProxyCidrs = clean(trustedProxyCidrs);
 		}

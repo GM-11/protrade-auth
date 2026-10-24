@@ -47,7 +47,23 @@ public final class TokenBuckets {
 			if (bucket.tokens >= 1) {
 				bucket.tokens -= 1;
 			} else {
-				wait[0] = Math.max(1, (long) Math.ceil((1 - bucket.tokens) / refillPerNano / 1_000_000_000.0));
+				wait[0] = secondsFor(1 - bucket.tokens);
+			}
+			return bucket;
+		});
+		return wait[0];
+	}
+
+	/** Like {@link #tryAcquire} but takes nothing: 0 if a token is available, else the seconds to wait. */
+	public long peekWait(String key) {
+		if (!buckets.containsKey(key)) {
+			return 0;
+		}
+		long[] wait = {0};
+		buckets.computeIfPresent(key, (k, cur) -> {
+			Bucket bucket = refilled(cur, nanos.getAsLong());
+			if (bucket.tokens < 1) {
+				wait[0] = secondsFor(1 - bucket.tokens);
 			}
 			return bucket;
 		});
@@ -73,6 +89,11 @@ public final class TokenBuckets {
 
 	int size() {
 		return buckets.size();
+	}
+
+	/** Whole seconds (at least 1) until {@code deficit} tokens have been added. The epsilon keeps 180.00000000000003 from becoming 181. */
+	private long secondsFor(double deficit) {
+		return Math.max(1, (long) Math.ceil(deficit / refillPerNano / 1_000_000_000.0 - 1e-6));
 	}
 
 	private Bucket refilled(Bucket b, long now) {

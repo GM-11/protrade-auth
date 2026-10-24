@@ -12,4 +12,9 @@ public class FakeGoogleConfig {
 	FakeGoogle fakeGoogle() {
 		return new FakeGoogle();
 	}
+
+	@Bean
+	FakeRateLimitClock rateLimitClock() {
+		return new FakeRateLimitClock();
+	}
 }

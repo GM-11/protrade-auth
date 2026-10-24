@@ -63,6 +63,9 @@ public abstract class IntegrationTest {
 	@Autowired
 	protected FakeGoogle google;
 
+	@Autowired
+	protected FakeRateLimitClock clock;
+
 	protected Http http() {
 		return new Http("http://127.0.0.1:" + port);
 	}

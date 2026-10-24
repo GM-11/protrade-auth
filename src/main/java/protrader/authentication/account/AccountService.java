@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import protrader.authentication.ratelimit.RateLimitedException;
 import protrader.authentication.ratelimit.RateLimiters;
+import protrader.authentication.ratelimit.TokenBuckets;
 import protrader.authentication.web.ApiException;
 
 @Service
@@ -43,20 +44,26 @@ public class AccountService {
 		}
 	}
 
-	/** The account id when email and password match; 401 bad_credentials otherwise, always the same way. */
-	public long authenticate(String rawEmail, String password) {
+
+	public long authenticate(String rawEmail, String password, String clientIp) {
 		if (rawEmail == null || password == null) {
 			throw ApiException.invalidField(rawEmail == null ? "email" : "password", "required");
 		}
 		String email = rawEmail.trim().toLowerCase(Locale.ROOT);
 
-		// A token is spent per attempt and given back on success, so only failures count. Checked before
-		// any BCrypt work and keyed on the email whether or not it exists, so it can't be used to probe.
-		// The account is never locked: once the bucket refills, the right password works again.
-		String limitKey = email.length() > 254 ? email.substring(0, 254) : email;
-		long wait = limiters.loginFailures().tryAcquire(limitKey);
-		if (wait > 0) {
-			throw new RateLimitedException(wait);
+		String emailKey = email.length() > 254 ? email.substring(0, 254) : email;
+		String strictKey = emailKey + "|" + clientIp;
+		TokenBuckets strict = limiters.loginFailuresPerEmailIp();
+		TokenBuckets loose = limiters.loginFailuresPerEmail();
+
+		long strictWait = strict.tryAcquire(strictKey);
+		if (strictWait > 0) {
+			throw new RateLimitedException(Math.max(strictWait, loose.peekWait(emailKey)));
+		}
+		long looseWait = loose.tryAcquire(emailKey);
+		if (looseWait > 0) {
+			strict.refund(strictKey);
+			throw new RateLimitedException(looseWait);
 		}
 		Account account = email.length() > 254 ? null : accounts.findByEmail(email).orElse(null);
 		boolean hasPassword = account != null && account.passwordHash() != null;
@@ -66,7 +73,8 @@ public class AccountService {
 		if (!hasPassword || !ok) {
 			throw ApiException.badCredentials();
 		}
-		limiters.loginFailures().refund(limitKey);
+		strict.refund(strictKey);
+		loose.refund(emailKey);
 		return account.id();
 	}
 

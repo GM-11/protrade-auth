@@ -6,7 +6,9 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.servlet.http.HttpServletRequest;
 import protrader.authentication.account.AccountService;
+import protrader.authentication.ratelimit.ClientIpResolver;
 import protrader.authentication.google.GoogleAuthRequest;
 import protrader.authentication.google.GoogleAuthService;
 import protrader.authentication.google.GoogleNonceService;
@@ -29,8 +31,10 @@ public class AuthController {
 	private final TokenService tokens;
 	private final GoogleAuthService google;
 	private final GoogleNonceService nonces;
+	private final ClientIpResolver clients;
 
-	public AuthController(AccountService accounts, TokenService tokens, GoogleAuthService google, GoogleNonceService nonces) {
+	public AuthController(AccountService accounts, TokenService tokens, GoogleAuthService google, GoogleNonceService nonces, ClientIpResolver clients) {
+		this.clients = clients;
 		this.nonces = nonces;
 		this.accounts = accounts;
 		this.tokens = tokens;
@@ -44,8 +48,8 @@ public class AuthController {
 	}
 
 	@PostMapping("/login")
-	LoginResponse login(@JsonBody LoginRequest request) {
-		return tokens.login(accounts.authenticate(request.email(), request.password()));
+	LoginResponse login(@JsonBody LoginRequest request, HttpServletRequest http) {
+		return tokens.login(accounts.authenticate(request.email(), request.password(), clients.resolve(http)));
 	}
 
 	@PostMapping("/refresh")

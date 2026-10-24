@@ -39,8 +39,9 @@ All settings are environment variables (mapped in `src/main/resources/applicatio
 | `REFRESH_FAMILY_MAX_TTL` | `90d` | absolute cap for one login chain, however active the user is |
 | `REFRESH_REUSE_GRACE` | `10s` | a refresh token rotated this recently may be presented again (lost response / concurrent refresh); see below |
 | `RATE_LIMIT_PER_IP_PER_MINUTE` | `20` | per client IP, per endpoint, on signup / login / refresh / google / google/nonce |
-| `RATE_LIMIT_LOGIN_FAILURES_PER_EMAIL` | `5` | login attempts that fail, per lower-cased email, per window |
-| `RATE_LIMIT_LOGIN_FAILURE_WINDOW` | `15m` | the window for the line above |
+| `RATE_LIMIT_LOGIN_FAILURES_PER_EMAIL_IP` | `5` | strict login limit: failed attempts per (lower-cased email, client IP) per window |
+| `RATE_LIMIT_LOGIN_FAILURES_PER_EMAIL` | `50` | loose login limit: failed attempts per lower-cased email, from any IP, per window. Must be at least the strict one |
+| `RATE_LIMIT_LOGIN_FAILURE_WINDOW` | `15m` | the window for both lines above |
 | `TRUSTED_PROXY_CIDRS` | – | comma list of proxy IPs / CIDRs whose `X-Forwarded-For` is believed; empty = never |
 | `GOOGLE_CLIENT_ID` | – | Google web client id |
 | `GOOGLE_CLIENT_SECRET` | – | Google web client secret (env / secret store only, never commit it) |
@@ -112,7 +113,10 @@ The gateway polls the key table every 30 s, so a new or disabled API key takes u
   The trade-off: a thief who replays a stolen token *inside* the 10 s window is not detected, and gets a working token of their own. We accept that because the thief would need the token within seconds of its rotation, while without a window every dropped response (mobile networks, a closed tab, two tabs refreshing together) would log the user out. Set `REFRESH_REUSE_GRACE=0s` for strict single-use.
 - Rate limits (`429 rate_limited`, with `Retry-After` in seconds), checked before any BCrypt work:
   - per client IP, per endpoint, 20 requests a minute on `signup`, `login`, `refresh`, `google` and `google/nonce` (a token bucket);
-  - on `login` only, additionally 5 *failed* attempts per lower-cased email per 15 minutes (the same bucket for existing and unknown emails). A successful login gives its attempt back. The account is never locked: once the bucket refills, the right password works again.
+  - on `login` only, two failure limiters, both checked before any BCrypt work and keyed on the email whether or not the account exists (a token is spent per attempt and refunded on a successful login):
+    - **strict**, per (email, client IP): 5 failures per 15 minutes. Someone guessing a victim's password is blocked only from *their own* IP; the real user logging in from elsewhere is unaffected.
+    - **loose**, per email: 50 failures per 15 minutes from any IPs. It caps guessing spread over many IPs. **This is a deliberate trade-off:** once 50 failures arrive from many IPs, everyone, including the real user, is blocked for that email until the bucket refills (one token every 18 s). A botnet can therefore still block one email, but only at a cost of 50 requests per 15 minutes from many addresses.
+    - When refused, `Retry-After` is the longer of the two waits. There is no lockout beyond this: when a bucket refills, the right password works again.
   - **The state is per instance, in memory.** With N instances behind a load balancer, the effective limits are up to N times higher, and a restart forgets everything. Idle entries are evicted and the maps are size-bounded.
   - The client IP is the socket peer. `X-Forwarded-For` is read only when the peer is inside `TRUSTED_PROXY_CIDRS` (empty by default), taking the right-most entry that is not itself a trusted proxy. IPv6 clients are limited per /64. Behind a load balancer you must set `TRUSTED_PROXY_CIDRS`, otherwise every user shares the balancer's bucket.
 - Signing in with Google for an email that already has a password account links the Google identity to it, **removes the password and revokes that account's refresh tokens**. Signup does not verify email ownership yet, so without this an attacker could pre-register someone's address with a password they know.
@@ -194,3 +198,31 @@ const { access_token, refresh_token, account_id } = await res.json();
 ```
 
 Our server then exchanges the code with Google (with the client secret and the verifier), validates the returned ID token (signature against Google's JWKS, `iss`, `aud`, expiry, `sub`, `email_verified`) and signs the user in. The `nonce` in the ID token was created by the SPA, so the SPA checks it; we only check a nonce sent with the `id_token` shape.
+
+## Verified against order_gateway
+
+Run on 2026-10-24 with the real `order_gateway` binary (built from `../order_gateway`) against this service in the `dev` profile, Postgres in Docker, everything on one machine (so the loopback-bound internal port works):
+
+```sh
+docker run -d --rm --name auth-pg -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=authentication -p 55432:5432 postgres:17-alpine
+DB_URL=jdbc:postgresql://127.0.0.1:55432/authentication DB_PASSWORD=pw ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+
+GATEWAY_ID=gw-manual GATEWAY_HTTP_ADDR=127.0.0.1:18080 \
+JWKS_URL=http://127.0.0.1:8082/.well-known/jwks.json JWT_ISSUER=protrader-identity JWT_AUDIENCE=order-gateway \
+API_KEYS_SOURCE=http://127.0.0.1:8081/internal/v1/api-keys EXCHANGE_INSTRUMENTS=../config/instruments.json ./order_gateway
+```
+
+The gateway started without the cash owner or the engine feed (it retries those connections), and logged `api keys loaded version=1 count=0` and `refreshed JWKS key_count=1`. No cash owner was running, so a request that passes authentication ends in `503 cash_owner_unavailable`; a failed authentication is `401`.
+
+| # | Request to the gateway (`:18080`) | Status | Meaning |
+|---|---|---|---|
+| 1 | `POST /v1/auth/signup`, then `POST /v1/auth/login` on this service | 201, 200 | got an `access_token` |
+| 2 | `GET /v2/account` with `Authorization: Bearer <access_token>` | **503** `cash_owner_unavailable` | authenticated; upstream down |
+| 3 | same with one character appended to the token | **401** | control: bad tokens are refused |
+| 4 | `POST /v1/api-keys` (JWT), then at once `GET /v2/account` with `X-Api-Key-Id` / `X-Api-Secret` | **401** | gateway has not polled yet (key table version 1) |
+| 5 | same request after the next 30 s poll (`api keys loaded version=2 count=1`) | **503** `cash_owner_unavailable` | key authenticated |
+| 6 | same with a wrong secret | **401** | |
+| 7 | `DELETE /v1/api-keys/{key_id}` (204), wait one poll (`version=3 count=1`), same key request | **401** | disabled key refused |
+| 8 | the JWT request again | **503** | tokens unaffected by the key change |
+
+No `401` appeared for a valid token or a valid, enabled key, so the service's tokens and key table are accepted by the real gateway. (`GatewayCompatibilityTest` additionally mirrors the gateway's token rules in Java.)

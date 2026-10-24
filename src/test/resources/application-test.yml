@@ -2,4 +2,5 @@
 auth:
   rate-limit:
     per-ip-per-minute: 100000
+    login-failures-per-email-ip: 100000
     login-failures-per-email: 100000
